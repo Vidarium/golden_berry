@@ -1,0 +1,795 @@
+---
+title: "Consumption of golden berries (Physalis peruviana L.) might reduce biomarkers of oxidative stress and alter gut permeability in men without changing inflammation  status or the gut microbiota"
+authors: "Jelver A. Sierra, Juan S. Escobar, Vanessa Corrales-Agudelo, Oscar J. Lara-Guzman,  Eliana P. Velasquez-Mejia, Juan C. Henao-Rojas, Alejandro Caro-Quintero, Fabrice  Vaillant, Katalina Muñoz-Durango"
+journal: "Food Research International 162 (2022) 111949"
+doi: "https://doi.org/10.1016/j.foodres.2022.111949"
+output: html_notebook
+---
+
+```{r Initial commands}
+# Clean the workspace
+rm(list = ls())
+
+# Seed for random generation
+set.seed(5600)
+
+# Upload required libraries
+library(plyr)
+library(dplyr)
+library(readxl)
+library(phyloseq)
+library(ape)
+library(tidyverse)
+library(BiodiversityR)
+library(GUniFrac)
+library(vegan)
+library(ggplot2)
+library(ggalt)
+library(ggrepel)
+library(viridis)
+library(epiR)
+library(reshape2)
+library(car)
+library(cowplot)
+library(DESeq2)
+library(EnhancedVolcano)
+
+```
+ 
+```{r Load data}
+# Set the working directory
+setwd(dir="d:/Vidarium/GitHub/golden_berry")
+
+# OTU table
+otu_mat = read_excel("golden_berry.otus.xlsx")
+
+# Taxonomy table
+tax_mat = read_excel("golden_berry.taxonomy.xlsx")
+
+# Metadata
+samples_df = read_excel("golden_berry.meta.xlsx")
+
+# Phylogenetic tree
+phy_tree = read_tree("golden_berry.tre")
+phy_tree = root(phy_tree, outgroup = "Otu00010")
+
+# Define the row names from the OTU column and remove the column since it is now used as a row name
+otu_mat <- column_to_rownames(otu_mat, var = "otu")
+tax_mat <- column_to_rownames(tax_mat, var = "otu")
+samples_df <- column_to_rownames(samples_df, var = "sample")
+
+# Transform into matrices OTU and taxonomy tables 
+otu_mat <- as.matrix(otu_mat)
+tax_mat <- as.matrix(tax_mat)
+
+# Transform to phyloseq objects
+OTU = otu_table(otu_mat, taxa_are_rows = TRUE)
+TAX = tax_table(tax_mat)
+samples = sample_data(samples_df)
+
+goldberry <- phyloseq(OTU, TAX, samples, phy_tree)
+
+# Rarefy the OTU table
+# Minimum depth (28,000 reads/sample)
+range(colSums(otu_table(goldberry)))
+otu_mat_rare = t(otu_mat)
+otu_mat_rare = Rarefy(otu_mat_rare, depth = 28000)$otu.tab.rff
+otu_mat_rare = t(otu_mat_rare)
+
+# Transform to phyloseq object
+OTU_rare = otu_table(otu_mat_rare, taxa_are_rows = TRUE)
+TAX = tax_table(tax_mat)
+samples = sample_data(samples_df)
+
+goldberry_rare <- phyloseq(OTU_rare, TAX, samples, phy_tree)
+
+# Visualize data
+sample_names(goldberry_rare)
+rank_names(goldberry_rare)
+sample_variables(goldberry_rare)
+
+# Calculate relative abundances
+standf = function(x) x/sum(x)
+goldberry_standf = transform_sample_counts(goldberry_rare, standf)
+
+# Verify that the OTU tables are OK
+range(colSums(otu_table(goldberry_rare)))
+range(colSums(otu_table(goldberry_standf)))
+
+```
+
+```{r Subset samples by time point}
+# This experiment included three time points: baseline (day 0), chronic (day 19) and post (day 49)
+
+# Baseline vs. chronic
+BC_rare = subset_samples(goldberry_rare, treatment == "baseline" | treatment == "chronic")
+BC_rare = filter_taxa(BC_rare, function(x) sum(x>0) >0, TRUE)
+
+# Baseline vs. post-intervention
+BP_rare = subset_samples(goldberry_rare, treatment == "baseline" | treatment == "post")
+BP_rare = filter_taxa(BP_rare, function(x) sum(x>0) >0, TRUE)
+
+# Chronic vs. post-intervention
+CP_rare = subset_samples(goldberry_rare, treatment == "chronic" | treatment == "post")
+CP_rare = filter_taxa(CP_rare, function(x) sum(x>0) >0, TRUE)
+
+```
+
+```{r Alpha diversity}
+# All treatments
+# OTU richness
+richness_goldberry = diversityresult(x = t(otu_table(goldberry_rare)), index = "richness", method = "each site")
+# Shannon diversity index
+shannon_goldberry = diversityresult(x = t(otu_table(goldberry_rare)), index = "Shannon", method = "each site")
+# Evenness
+Jevenness_goldberry = diversityresult(x = t(otu_table(goldberry_rare)), index = "Jevenness", method = "each site")
+
+alpha_div = data.frame(richness = richness_goldberry, shannon = shannon_goldberry, evenness = Jevenness_goldberry, individual = as.data.frame(sample_data(goldberry_rare))$individual, treatment = as.data.frame(sample_data(goldberry_rare))$treatment)
+
+#+++++++++++++++++++++++++
+# Function to calculate the mean and the standard error mean
+# for each group
+#+++++++++++++++++++++++++
+# data : a data frame
+# varname : the name of a column containing the variable
+# to be summariezed
+# groupnames : vector of column names to be used as
+# grouping variables
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sem = sd(x[[col]], na.rm=TRUE)/sqrt(length(x[[col]])-1))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c("mean" = varname))
+  return(data_sum)
+}
+
+# Summarize the data
+alpha_div2<-data_summary(alpha_div, varname="Shannon", 
+                         groupnames=c("treatment"))
+
+# Figure 2A
+plot_shannon = ggplot(data=alpha_div2, aes(x=treatment, y=Shannon)) + 
+  geom_errorbar(aes(ymin=Shannon-sem, ymax=Shannon+sem), width=.1) +
+  geom_line() +
+  geom_point() +
+  labs(y="Shannon diversity index",x='') +
+  scale_x_discrete(labels=c("baseline"="Day 0", "chronic"="Day 19", "post"="Day 49")) +
+  theme(legend.position = "none") +
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14))
+plot_shannon
+pdf(file="Figure 2A.pdf", width=8, height=6)
+plot_shannon
+dev.off()
+
+### Hypothesis testing
+# Shannon
+Anova(lm(Shannon ~ treatment + individual, data = alpha_div))
+# OTU richness
+Anova(lm(richness ~ treatment + individual, data = alpha_div))
+# Evenness
+Anova(lm(Jevenness ~ treatment + individual, data = alpha_div))
+
+```
+
+```{r Beta diversity: OTU abundance}
+# Multivariate analysis based on unweighted (qualitative) and weighted (quantitative) UniFrac distances and PCoA ordination
+unifrac_pcoa = ordinate(goldberry_rare, method = "PCoA", distance = "unifrac", weighted=FALSE)
+wunifrac_pcoa = ordinate(goldberry_rare, method = "PCoA", distance = "unifrac", weighted=TRUE)
+
+# Fraction of the variance of the data represented in the ordination
+unifrac_e.PC1 = round(unifrac_pcoa$values$Eigenvalues[1]/sum(unifrac_pcoa$values$Eigenvalues), 4)* 100
+unifrac_e.PC2 = round(unifrac_pcoa$values$Eigenvalues[2]/sum(unifrac_pcoa$values$Eigenvalues), 4)* 100
+unifrac_e.PC3 = round(unifrac_pcoa$values$Eigenvalues[3]/sum(unifrac_pcoa$values$Eigenvalues), 4)* 100
+
+wunifrac_e.PC1 = round(wunifrac_pcoa$values$Eigenvalues[1]/sum(wunifrac_pcoa$values$Eigenvalues), 4)* 100
+wunifrac_e.PC2 = round(wunifrac_pcoa$values$Eigenvalues[2]/sum(wunifrac_pcoa$values$Eigenvalues), 4)* 100
+wunifrac_e.PC3 = round(wunifrac_pcoa$values$Eigenvalues[3]/sum(wunifrac_pcoa$values$Eigenvalues), 4)* 100
+
+# PCoA table
+pcoa_table = data.frame(PC1.unifrac = unifrac_pcoa$vectors[, 1],  PC2.unifrac = unifrac_pcoa$vectors[, 2],  PC3.unifrac = unifrac_pcoa$vectors[, 3],  PC1.wunifrac = wunifrac_pcoa$vectors[, 1],  PC2.wunifrac = wunifrac_pcoa$vectors[, 2],  PC3.wunifrac = wunifrac_pcoa$vectors[, 3],  individual = sample_data(goldberry_rare)[,"individual"], treatment = sample_data(goldberry_rare)[,"treatment"])
+pcoa_table1 = data.frame(individual = sample_data(BC_rare)[,"individual"], treatment = sample_data(BC_rare)[,"treatment"])
+pcoa_table2 = data.frame(individual = sample_data(BP_rare)[,"individual"], treatment = sample_data(BP_rare)[,"treatment"])
+pcoa_table3 = data.frame(individual = sample_data(CP_rare)[,"individual"], treatment = sample_data(CP_rare)[,"treatment"])
+
+# Distance indexes
+# All treatments
+unifrac_dist = phyloseq::distance(goldberry_rare, "unifrac", type = "samples")
+wunifrac_dist = phyloseq::distance(goldberry_rare, "wunifrac", type = "samples")
+
+# Baseline & chronic
+unifrac_dist_BC = phyloseq::distance(BC_rare, "unifrac", type = "samples")
+wunifrac_dist_BC = phyloseq::distance(BC_rare, "wunifrac", type = "samples")
+
+# Baseline & post
+unifrac_dist_BP = phyloseq::distance(BP_rare, "unifrac", type = "samples")
+wunifrac_dist_BP = phyloseq::distance(BP_rare, "wunifrac", type = "samples")
+
+# Chronic & post
+unifrac_dist_CP = phyloseq::distance(CP_rare, "unifrac", type = "samples")
+wunifrac_dist_CP = phyloseq::distance(CP_rare, "wunifrac", type = "samples")
+
+# Hypothesis testing
+# All treatments
+adonis2(unifrac_dist ~ treatment + individual, data = pcoa_table)
+adonis2(wunifrac_dist ~ treatment + individual, data = pcoa_table)
+
+# Baseline & chronic
+adonis2(unifrac_dist_BC ~ treatment + individual, data = pcoa_table1)
+adonis2(wunifrac_dist_BC ~ treatment + individual, data = pcoa_table1)
+
+# Baseline & post
+adonis2(unifrac_dist_BP ~ treatment + individual, data = pcoa_table2)
+adonis2(wunifrac_dist_BP ~ treatment + individual, data = pcoa_table2)
+
+# Chronic & post
+adonis2(unifrac_dist_CP ~ treatment + individual, data = pcoa_table3)
+adonis2(wunifrac_dist_CP ~ treatment + individual, data = pcoa_table3)
+
+
+# PCoA plots with polygons connecting data points
+# Weighted unifrac
+# Per individual (all treatments)
+wunifracplot_pcoa_ind = ggplot(pcoa_table) +
+  geom_point(aes(x=PC1.wunifrac, y=PC2.wunifrac, shape = treatment, color=individual), size = 4) +
+  geom_encircle(aes(x=PC1.wunifrac, y=PC2.wunifrac, fill = individual), s_shape = 1, expand = 0, alpha = 0.2, color = "black", show.legend = FALSE) +
+  labs(x=paste("PCoA1 (", wunifrac_e.PC1, "%)", sep=""), y=paste("PCoA2 (", wunifrac_e.PC2, "%)", sep="")) +
+  geom_text_repel(aes(x=PC1.wunifrac, y=PC2.wunifrac, label=individual), size=4) +
+  scale_fill_viridis(discrete=TRUE) +
+  scale_color_viridis(discrete=TRUE) +
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14))
+wunifracplot_pcoa_ind
+# Figure 3A
+pdf(file="Figure 3A.pdf", width=10, height=7)
+wunifracplot_pcoa_ind
+dev.off()
+
+### Lin's concordance correlation coefficients (CCC): OTU abundance
+
+# Get lower triangle of the correlation matrix
+get_lower_tri = function(x){
+  x[upper.tri(x, diag=TRUE)] = NA
+  return(x)
+}
+
+# Weighted wunifrac (Figure 3C)
+wunifrac_dist = as.matrix(wunifrac_dist)
+wunifrac_cor = cor(wunifrac_dist)
+wunifrac_ccc = epi.occc(wunifrac_dist, pairs = TRUE)
+wunifrac_ccc = wunifrac_ccc$pairs$ccc
+
+wunifrac_cor_low_tri = get_lower_tri(wunifrac_cor)
+melted_wunifrac_cor = melt(wunifrac_cor_low_tri, na.rm = TRUE)
+id1 = str_extract(melted_wunifrac_cor$Var1, "UCH_[0-9]+")
+id2 = str_extract(melted_wunifrac_cor$Var2, "UCH_[0-9]+")
+comparison = function(x, y) ifelse(x == y, "intra", "inter")
+id3 = comparison(id1, id2)
+
+wunifrac_ccc = data.frame(CCC = wunifrac_ccc, Var1 = melted_wunifrac_cor$Var1, Var2 = melted_wunifrac_cor$Var2, id1 = id1, id2 = id2, id3 = id3)
+aggregate(CCC ~ id3, FUN = mean, data = wunifrac_ccc)
+Anova(lm(CCC ~ id3, data = wunifrac_ccc))
+
+wunifrac_ccc_heatmap = ggplot(data = wunifrac_ccc, aes(Var1, Var2, fill = CCC)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis() +
+  labs(fill="Lin's concordance\ncorrelation coefficient") +
+  theme(panel.border = element_blank(), panel.grid = element_blank(), panel.background = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 0, size = 12), axis.text.y = element_text(vjust = 0.5, hjust = 1, size = 12)) +
+  theme(legend.title = element_text(size=14),
+        legend.text = element_text(size=12)) +
+  scale_y_discrete(position = "right") +
+  labs(x = "", y = "") +
+  coord_fixed()
+
+# Correlations after removing  the diagonal of the correlation matrix
+intra_inter_wunifrac_ccc = ggplot(wunifrac_ccc, aes(x=id3, y=CCC)) +
+  theme(panel.border = element_blank(), panel.background = element_blank(), legend.position="none") +
+  theme(axis.text=element_text(size=14),
+        axis.title=element_text(size=16)) +
+  labs(x = "", y = "Lin's correlation\nweighted UniFrac") +
+  geom_jitter(width=0.2, color="gray", size=1) +
+  geom_boxplot(outlier.shape=NA, alpha = 0)
+
+# Put the 2 figures in one
+wunifrac_ccc_plot = ggdraw() +
+  draw_plot(wunifrac_ccc_heatmap, x=0, y=0, width=1, height=1, scale = 1) +
+  draw_plot(intra_inter_wunifrac_ccc, x=0, y=0.5, width=0.2, height=0.5, scale = 1)
+wunifrac_ccc_plot
+# Figure 3C
+pdf(file="Figure 3C.pdf", width=10, height=8)
+wunifrac_ccc_plot
+dev.off()
+
+```
+
+```{r Beta diversity: metagenomic predictions (picrust2)}
+# Metacyc pathways
+# Unstratified pathway prediction (i.e., normalized counts and relative frequencies of each pathway per sample)
+intervention_abund_picrust2_unstrat = read.table(file="path_abun_unstrat2.tsv", header=TRUE, sep="\t", row.names = 1)
+# Transpose the table
+intervention_abund_picrust2_unstrat = t(intervention_abund_picrust2_unstrat)
+# Calculate relative abundance of each pathway
+intervention_abund_picrust2_unstrat_relfreq = intervention_abund_picrust2_unstrat/rowSums(intervention_abund_picrust2_unstrat)
+
+# KEGG orthologs
+# Unstratified KO prediction (i.e., normalized counts and relative frequencies or each KO per sample)
+intervention_abund_KO_unstrat = read.table(file="pred_metagenome_unstrat2.tsv", header=TRUE, sep="\t", row.names = 1)
+# Transpose the table
+intervention_abund_KO_unstrat = t(intervention_abund_KO_unstrat)
+# Calculate relative abundance of each pathway
+intervention_abund_KO_unstrat_relfreq = intervention_abund_KO_unstrat/rowSums(intervention_abund_KO_unstrat)
+
+
+# KEGG orthologs (all treatments)
+# Bray-Curtis
+bc.goldberry_KO = vegdist(intervention_abund_KO_unstrat[,-c(1:4)], method = "bray", upper = FALSE, diag = FALSE)
+bc.goldberry_KO = as.matrix(bc.goldberry_KO)
+adonis2(bc.goldberry_KO ~ pcoa_table$treatment + pcoa_table$individual)
+
+bc.goldberry_KO_relfreq = vegdist(intervention_abund_KO_unstrat_relfreq[,-c(1:4)], method = "bray", upper = FALSE, diag = FALSE)
+bc.goldberry_KO_relfreq = as.matrix(bc.goldberry_KO_relfreq)
+adonis2(bc.goldberry_KO_relfreq ~ pcoa_table$treatment + pcoa_table$individual)
+
+# All treatments
+bc.goldberry_KO_relfreq.pcoa = cmdscale(bc.goldberry_KO_relfreq, k=5, eig = TRUE)
+bc.goldberry_KO_relfreq.PC1 = round(bc.goldberry_KO_relfreq.pcoa$eig[1]/sum(bc.goldberry_KO_relfreq.pcoa$eig), 4)* 100
+bc.goldberry_KO_relfreq.PC2 = round(bc.goldberry_KO_relfreq.pcoa$eig[2]/sum(bc.goldberry_KO_relfreq.pcoa$eig), 4)* 100
+bc.goldberry_KO_relfreq.PC3 = round(bc.goldberry_KO_relfreq.pcoa$eig[3]/sum(bc.goldberry_KO_relfreq.pcoa$eig), 4)* 100
+
+pcoa_table<-cbind(pcoa_table,
+                  PC1.bc_KO_relfreq = bc.goldberry_KO_relfreq.pcoa$points[, 1],
+                  PC2.bc_KO_relfreq = bc.goldberry_KO_relfreq.pcoa$points[, 2],
+                  PC3.bc_KO_relfreq = bc.goldberry_KO_relfreq.pcoa$points[, 3])
+
+
+# Metacyc pathways
+# PCoA per individual (all treatments)
+brayplot_KO_pcoa_ind = ggplot(pcoa_table) +
+  geom_point(aes(x=PC1.bc_KO_relfreq, y=PC2.bc_KO_relfreq, shape = treatment, color=individual), size = 4) +
+  geom_encircle(aes(x=PC1.bc_KO_relfreq, y=PC2.bc_KO_relfreq, fill = individual), s_shape = 1, expand = 0, alpha = 0.2, color = "black", show.legend = FALSE) +
+  labs(x=paste("PCoA1 (", bc.goldberry_KO_relfreq.PC1,"%)", sep=""), y=paste("PCoA2 (", bc.goldberry_KO_relfreq.PC2,"%)", sep="")) +
+  geom_text_repel(aes(x=PC1.bc_KO_relfreq, y=PC2.bc_KO_relfreq, label=individual), size=4) +
+  scale_fill_viridis(discrete=TRUE) +
+  scale_color_viridis(discrete=TRUE) +
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14))
+brayplot_KO_pcoa_ind
+# Figure 3B
+pdf(file="Figure 3B.pdf", width=10, height=7)
+brayplot_KO_pcoa_ind
+dev.off()
+
+
+### Lin's concordance correlation coefficient (CCC): Metacyc pathways
+
+# Bray-Curtis
+# Distances between samples
+bray_path_dist = vegdist(intervention_abund_picrust2_unstrat_relfreq[,-c(1:4)], method = "bray", upper = FALSE, diag = FALSE)
+bray_path_dist = as.matrix(bray_path_dist)
+
+bray_path_dist = as.matrix(bray_path_dist)
+bray_path_cor = cor(bray_path_dist)
+bray_path_ccc = epi.occc(bray_path_dist, pairs = TRUE)
+bray_path_ccc = bray_path_ccc$pairs$ccc
+
+bray_path_cor_low_tri = get_lower_tri(bray_path_cor)
+melted_bray_path_cor = melt(bray_path_cor_low_tri, na.rm = TRUE)
+id1 = str_extract(melted_bray_path_cor$Var1, "UCH_[0-9]+")
+id2 = str_extract(melted_bray_path_cor$Var2, "UCH_[0-9]+")
+comparison = function(x, y) ifelse(x == y, "intra", "inter")
+id3 = comparison(id1, id2)
+
+bray_path_ccc = data.frame(CCC = bray_path_ccc, Var1 = melted_bray_path_cor$Var1, Var2 = melted_bray_path_cor$Var2, id1 = id1, id2 = id2, id3 = id3)
+aggregate(CCC ~ id3, FUN = mean, data = bray_path_ccc)
+Anova(lm(CCC ~ id3, data = bray_path_ccc))
+
+bray_path_ccc_heatmap = ggplot(data = bray_path_ccc, aes(Var1, Var2, fill = CCC)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis() +
+  labs(fill="Lin's concordance\ncorrelation coefficient") +
+  theme(panel.border = element_blank(), panel.grid = element_blank(), panel.background = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 0, size = 12), axis.text.y = element_text(vjust = 0.5, hjust = 1, size = 12)) +
+  theme(legend.title = element_text(size=14),
+        legend.text = element_text(size=12)) +
+  scale_y_discrete(position = "right") +
+  labs(x = "", y = "") +
+  coord_fixed()
+
+# Correlations after removing  the diagonal of the correlation matrix
+intra_inter_bray_path_ccc = ggplot(bray_path_ccc, aes(x=id3, y=CCC)) +
+  theme(panel.border = element_blank(), panel.background = element_blank(), legend.position="none") +
+  theme(axis.text=element_text(size=14),
+        axis.title=element_text(size=16)) +
+  labs(x = "", y = "Lin's correlation\nBray-Curtis") +
+  geom_jitter(width=0.2, color="gray", size=1) +
+  geom_boxplot(outlier.shape=NA, alpha = 0)
+
+# Put the 2 figures in one
+bray_path_ccc_plot = ggdraw() +
+  draw_plot(bray_path_ccc_heatmap, x=0, y=0, width=1, height=1, scale = 1) +
+  draw_plot(intra_inter_bray_path_ccc, x=0, y=0.5, width=0.2, height=0.5, scale = 1)
+bray_path_ccc_plot
+# Figure 3D
+pdf(file="Figure 3D.pdf", width=10, height=8)
+bray_path_ccc_plot
+dev.off()
+
+# Lin's concordance correlation coefficient (CCC): KEGG orthologs
+
+# Bray-Curtis
+# Distances between samples
+bray_KO_dist = vegdist(intervention_abund_KO_unstrat_relfreq[,-c(1:4)], method = "bray", upper = FALSE, diag = FALSE)
+
+bray_KO_dist = as.matrix(bray_KO_dist)
+bray_KO_cor = cor(bray_KO_dist)
+bray_KO_ccc = epi.occc(bray_KO_dist, pairs = TRUE)
+bray_KO_ccc = bray_KO_ccc$pairs$ccc
+
+bray_KO_cor_low_tri = get_lower_tri(bray_KO_cor)
+melted_bray_KO_cor = melt(bray_KO_cor_low_tri, na.rm = TRUE)
+id1 = str_extract(melted_bray_KO_cor$Var1, "UCH_[0-9]+")
+id2 = str_extract(melted_bray_KO_cor$Var2, "UCH_[0-9]+")
+comparison = function(x, y) ifelse(x == y, "intra", "inter")
+id3 = comparison(id1, id2)
+
+bray_KO_ccc = data.frame(CCC = bray_KO_ccc, Var1 = melted_bray_KO_cor$Var1, Var2 = melted_bray_KO_cor$Var2, id1 = id1, id2 = id2, id3 = id3)
+aggregate(CCC ~ id3, FUN = mean, data = bray_KO_ccc)
+Anova(lm(CCC ~ id3, data = bray_KO_ccc))
+
+bray_KO_ccc_heatmap = ggplot(data = bray_KO_ccc, aes(Var1, Var2, fill = CCC)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis() +
+  labs(fill="Lin's concordance\ncorrelation coefficient") +
+  theme(panel.border = element_blank(), panel.grid = element_blank(), panel.background = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 0, size = 8), axis.text.y = element_text(vjust = 0.5, hjust = 1, size = 8)) +
+  scale_y_discrete(position = "right") +
+  labs(x = "", y = "") +
+  coord_fixed()
+
+# Correlations after removing  the diagonal of the correlation matrix
+intra_inter_bray_KO_ccc = ggplot(bray_KO_ccc, aes(x=id3, y=CCC)) +
+  theme(panel.border = element_blank(), panel.background = element_blank(), legend.position="none") +
+  labs(x = "", y = "Lin's correlation\nBray-Curtis") +
+  geom_jitter(width=0.2, color="gray", size=1) +
+  geom_boxplot(outlier.shape=NA, alpha = 0)
+
+# Put the 2 figures in one
+bray_KO_ccc_plot = ggdraw() +
+  draw_plot(bray_KO_ccc_heatmap, x=0, y=0, width=1, height=1, scale = 1) +
+  draw_plot(intra_inter_bray_KO_ccc, x=0.1, y=0.5, width=0.2, height=0.5, scale = 1)
+bray_KO_ccc_plot
+
+```
+
+```{r DESeq2 and volcano plot: OTU abundance}
+
+## Chronic vs. baseline
+sample_data(BC_rare)$treatment = as.factor(sample_data(BC_rare)$treatment)
+sample_data(BC_rare)$treatment = relevel(sample_data(BC_rare)$treatment, ref = "baseline")
+
+dds_BC_resp = phyloseq_to_deseq2(BC_rare, design = ~ treatment)
+dds_BC_resp = DESeq(dds_BC_resp, test="Wald", fitType="parametric")
+res_dds_BC_resp = results(dds_BC_resp, cooksCutoff = FALSE)
+res_dds_BC_resp = cbind(as(res_dds_BC_resp, "data.frame"), as(tax_table(BC_rare)[rownames(res_dds_BC_resp), ], "matrix"))
+alpha = 0.05
+sigtab_dds_BC_resp = res_dds_BC_resp[which(res_dds_BC_resp$pvalue < alpha), ]
+sigtab_dds_BC_resp
+
+# Let's look at the OTUs that were significantly different between the two treatments
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+  scale_fill_brewer(palette = palname, ...)
+}
+
+x = tapply(sigtab_dds_BC_resp$log2FoldChange, rownames(sigtab_dds_BC_resp), function(x) max(x))
+x = sort(x, TRUE)
+rownames(sigtab_dds_BC_resp) = factor(as.character(rownames(sigtab_dds_BC_resp)), levels=names(x))
+
+# Fold-change plot
+ggplot(sigtab_dds_BC_resp, aes(x=Species, y=log2FoldChange, color=Phylum)) + geom_point(size=6) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+# Volcano plot
+pdf(file="Figure 2B.pdf", width=8, height=6)
+EnhancedVolcano(res_dds_BC_resp,
+                lab = paste(res_dds_BC_resp$Species, " (",rownames(res_dds_BC_resp), ")", sep = ""),
+                title = NULL,
+                subtitle = NULL,
+                caption = NULL,
+#                legendVisible = FALSE,
+                x = 'log2FoldChange',
+                y = 'padj',
+                ylim = c(0,15),
+#                transcriptLabhjust = 1,
+                pCutoff = 0.1,
+#                transcriptPointSize = 1.5,
+#                transcriptLabSize = 3,
+                col=c('black', 'black', 'black', 'red3'),
+                colAlpha = 1,
+                drawConnectors = TRUE)
+dev.off()
+
+
+## Post vs. baseline
+sample_data(BP_rare)$treatment = as.factor(sample_data(BP_rare)$treatment)
+sample_data(BP_rare)$treatment = relevel(sample_data(BP_rare)$treatment, ref = "baseline")
+
+dds_BP_resp = phyloseq_to_deseq2(BP_rare, design = ~ treatment)
+dds_BP_resp = DESeq(dds_BP_resp, test="Wald", fitType="parametric")
+res_dds_BP_resp = results(dds_BP_resp, cooksCutoff = FALSE)
+res_dds_BP_resp = cbind(as(res_dds_BP_resp, "data.frame"), as(tax_table(BP_rare)[rownames(res_dds_BP_resp), ], "matrix"))
+alpha = 0.05
+sigtab_dds_BP_resp = res_dds_BP_resp[which(res_dds_BP_resp$pvalue < alpha), ]
+sigtab_dds_BP_resp
+
+# Let's look at the OTUs that were significantly different between the two treatments
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+  scale_fill_brewer(palette = palname, ...)
+}
+
+x = tapply(sigtab_dds_BP_resp$log2FoldChange, rownames(sigtab_dds_BP_resp), function(x) max(x))
+x = sort(x, TRUE)
+rownames(sigtab_dds_BP_resp) = factor(as.character(rownames(sigtab_dds_BP_resp)), levels=names(x))
+
+# Fold-change plot
+ggplot(sigtab_dds_BP_resp, aes(x=Species, y=log2FoldChange, color=Phylum)) + geom_point(size=6) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+# Volcano plot
+EnhancedVolcano(res_dds_BP_resp,
+                lab = paste(res_dds_BP_resp$Species, " (", rownames(res_dds_BP_resp), ")", sep = ""),
+                title = NULL,
+                subtitle = NULL,
+                caption = NULL,
+#                legendVisible = FALSE,
+                x = 'log2FoldChange',
+                y = 'padj',
+#                transcriptLabhjust = 1,
+                pCutoff = 0.1,
+#                transcriptPointSize = 1.5,
+#                transcriptLabSize = 3,
+                col=c('black', 'black', 'black', 'red3'),
+                colAlpha = 1,
+                drawConnectors = TRUE)
+
+
+## Post vs. chronic
+sample_data(CP_rare)$treatment = as.factor(sample_data(CP_rare)$treatment)
+sample_data(CP_rare)$treatment = relevel(sample_data(CP_rare)$treatment, ref = "chronic")
+
+dds_CP_resp = phyloseq_to_deseq2(CP_rare, design = ~ treatment)
+dds_CP_resp = DESeq(dds_CP_resp, test="Wald", fitType="parametric")
+res_dds_CP_resp = results(dds_CP_resp, cooksCutoff = FALSE)
+res_dds_CP_resp = cbind(as(res_dds_CP_resp, "data.frame"), as(tax_table(CP_rare)[rownames(res_dds_CP_resp), ], "matrix"))
+alpha = 0.05
+sigtab_dds_CP_resp = res_dds_CP_resp[which(res_dds_CP_resp$pvalue < alpha), ]
+sigtab_dds_CP_resp
+
+# Let's look at the OTUs that were significantly different between the two treatments
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+  scale_fill_brewer(palette = palname, ...)
+}
+
+x = tapply(sigtab_dds_CP_resp$log2FoldChange, rownames(sigtab_dds_CP_resp), function(x) max(x))
+x = sort(x, TRUE)
+rownames(sigtab_dds_CP_resp) = factor(as.character(rownames(sigtab_dds_CP_resp)), levels=names(x))
+
+# Fold-change plot
+ggplot(sigtab_dds_CP_resp, aes(x=Species, y=log2FoldChange, color=Phylum)) + geom_point(size=6) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+# Volcano plot
+EnhancedVolcano(res_dds_CP_resp,
+                lab = paste(res_dds_CP_resp$Species, " (", rownames(res_dds_CP_resp), ")", sep = ""),
+                title = NULL,
+                subtitle = NULL,
+                caption = NULL,
+#                legendVisible = FALSE,
+                x = 'log2FoldChange',
+                y = 'padj',
+                ylim = c(0,20),
+                pCutoff = 0.05,
+#                transcriptPointSize = 1.5,
+#                transcriptLabSize = 3,
+                col=c('black', 'black', 'black', 'red3'),
+                colAlpha = 1,
+                drawConnectors = TRUE)
+
+```
+
+```{r DESEq2 and volcano plot:  metagenome predictions (picrust2)}
+# Add metadata to the picrust2 matrix
+intervention_abund_KO_unstrat = cbind(sample_data(goldberry), intervention_abund_KO_unstrat)
+intervention_abund_KO_unstrat_relfreq = cbind(sample_data(goldberry), intervention_abund_KO_unstrat_relfreq)
+
+### KEGG orthologs
+# Baseline & chronic
+BC_KO = intervention_abund_KO_unstrat[intervention_abund_KO_unstrat$treatment == "baseline" | intervention_abund_KO_unstrat$treatment == "chronic",]
+coldata = BC_KO[1:4]
+BC_KO = BC_KO[,-c(1:4)]
+BC_KO = t(BC_KO)
+all(rownames(coldata) == colnames(BC_KO))
+BC_KO_rounded = round(BC_KO)
+
+# Baseline & post
+BP_KO = intervention_abund_KO_unstrat[intervention_abund_KO_unstrat$treatment == "baseline" | intervention_abund_KO_unstrat$treatment == "post",]
+coldata = BP_KO[1:4]
+BP_KO = BP_KO[,-c(1:4)]
+BP_KO = t(BP_KO)
+all(rownames(coldata) == colnames(BP_KO))
+BP_KO_rounded = round(BP_KO)
+
+# Chronic & post
+CP_KO = intervention_abund_KO_unstrat[intervention_abund_KO_unstrat$treatment == "chronic" | intervention_abund_KO_unstrat$treatment == "post",]
+coldata = CP_KO[1:4]
+CP_KO = CP_KO[,-c(1:4)]
+CP_KO = t(CP_KO)
+all(rownames(coldata) == colnames(CP_KO))
+CP_KO_rounded = round(CP_KO)
+
+# Add metadata to the picrust2 matrix
+BC_KO_rounded = cbind(sample_data(BC_rare), t(BC_KO_rounded))
+BP_KO_rounded = cbind(sample_data(BP_rare), t(BP_KO_rounded))
+CP_KO_rounded = cbind(sample_data(CP_rare), t(CP_KO_rounded))
+
+
+## Baseline vs. chronic
+# Add metadata to the picrust2 matrix
+coldata = BC_KO_rounded[1:4]
+BC_KO_rounded = BC_KO_rounded[,-c(1:4)]
+BC_KO_rounded = t(BC_KO_rounded)
+all(rownames(coldata) == colnames(BC_KO_rounded))
+
+coldata$treatment = as.factor(coldata$treatment)
+coldata$treatment = relevel(coldata$treatment, ref = "baseline")
+
+dds_BC_KO = DESeqDataSetFromMatrix(countData = BC_KO_rounded,
+                                   colData = coldata,
+                                   design = ~ treatment)
+
+dds_BC_KO = DESeq(dds_BC_KO, test="Wald", fitType="parametric")
+res_dds_BC_KO = results(dds_BC_KO, cooksCutoff = FALSE)
+alpha = 0.05
+sigtab_dds_BC_KO = res_dds_BC_KO[which(res_dds_BC_KO$pvalue < alpha), ]
+sigtab_dds_BC_KO
+write.table(sigtab_dds_BC_KO, file="sigtab_dds_BC_KO_chronic_vs_baseline.txt", sep="\t", quote=FALSE)
+
+# Let's look at the OTUs that were significantly different between the two treatments
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+  scale_fill_brewer(palette = palname, ...)
+}
+# Pathways order
+x = tapply(sigtab_dds_BC_KO$log2FoldChange, rownames(sigtab_dds_BC_KO), function(x) max(x))
+x = sort(x, TRUE)
+rownames(sigtab_dds_BC_KO) = factor(as.character(rownames(sigtab_dds_BC_KO)), levels=names(x))
+
+# Fold-change plot
+ggplot(as.data.frame(sigtab_dds_BC_KO), aes(x=rownames(sigtab_dds_BC_KO), y=log2FoldChange)) + geom_point(size=6) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+# Volcano plot
+EnhancedVolcano(res_dds_BC_KO,
+                lab = rownames(res_dds_BC_KO),
+                subtitle = NULL,
+                caption = NULL,
+#                legendVisible = FALSE,
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = 0.05,
+#                transcriptPointSize = 1.5,
+#                transcriptLabSize = 4.0,
+                col=c('black', 'black', 'black', 'red3'),
+                colAlpha = 1,
+                drawConnectors = TRUE)
+
+
+## Baseline vs. post
+# Add metadata to the picrust2 matrix
+coldata = BP_KO_rounded[1:4]
+BP_KO_rounded = BP_KO_rounded[,-c(1:4)]
+BP_KO_rounded = t(BP_KO_rounded)
+all(rownames(coldata) == colnames(BP_KO_rounded))
+
+coldata$treatment = as.factor(coldata$treatment)
+coldata$treatment = relevel(coldata$treatment, ref = "baseline")
+
+dds_BP_KO = DESeqDataSetFromMatrix(countData = BP_KO_rounded,
+                                   colData = coldata,
+                                   design = ~ treatment)
+
+dds_BP_KO = DESeq(dds_BP_KO, test="Wald", fitType="parametric")
+res_dds_BP_KO = results(dds_BP_KO, cooksCutoff = FALSE)
+alpha = 0.05
+sigtab_dds_BP_KO = res_dds_BP_KO[which(res_dds_BP_KO$pvalue < alpha), ]
+sigtab_dds_BP_KO
+write.table(sigtab_dds_BP_KO, file="sigtab_dds_BP_KO_post_vs_baseline.txt", sep="\t", quote=FALSE)
+
+# Let's look at the OTUs that were significantly different between the two treatments
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+  scale_fill_brewer(palette = palname, ...)
+}
+# Pathways order
+x = tapply(sigtab_dds_BP_KO$log2FoldChange, rownames(sigtab_dds_BP_KO), function(x) max(x))
+x = sort(x, TRUE)
+rownames(sigtab_dds_BP_KO) = factor(as.character(rownames(sigtab_dds_BP_KO)), levels=names(x))
+
+# Fold-change plot
+ggplot(as.data.frame(sigtab_dds_BP_KO), aes(x=rownames(sigtab_dds_BP_KO), y=log2FoldChange)) + geom_point(size=6) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+# Volcano plot
+EnhancedVolcano(res_dds_BP_KO,
+                lab = rownames(res_dds_BP_KO),
+                subtitle = NULL,
+                caption = NULL,
+#                legendVisible = FALSE,
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = 0.05,
+#                transcriptPointSize = 1.5,
+#                transcriptLabSize = 4.0,
+                col=c('black', 'black', 'black', 'red3'),
+                colAlpha = 1,
+                drawConnectors = TRUE)
+
+
+## Chronic vs. post
+# Add metadata to the picrust2 matrix
+coldata = CP_KO_rounded[1:4]
+CP_KO_rounded = CP_KO_rounded[,-c(1:4)]
+CP_KO_rounded = t(CP_KO_rounded)
+all(rownames(coldata) == colnames(CP_KO_rounded))
+
+coldata$treatment = as.factor(coldata$treatment)
+coldata$treatment = relevel(coldata$treatment, ref = "chronic")
+
+dds_CP_KO = DESeqDataSetFromMatrix(countData = CP_KO_rounded,
+                                   colData = coldata,
+                                   design = ~ treatment)
+
+dds_CP_KO = DESeq(dds_CP_KO, test="Wald", fitType="parametric")
+res_dds_CP_KO = results(dds_CP_KO, cooksCutoff = FALSE)
+alpha = 0.05
+sigtab_dds_CP_KO = res_dds_CP_KO[which(res_dds_CP_KO$pvalue < alpha), ]
+sigtab_dds_CP_KO
+write.table(sigtab_dds_CP_KO, file="sigtab_dds_CP_KO_post_vs_chronic.txt", sep="\t", quote=FALSE)
+
+# Let's look at the OTUs that were significantly different between the two treatments
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+  scale_fill_brewer(palette = palname, ...)
+}
+# Pathways order
+x = tapply(sigtab_dds_CP_KO$log2FoldChange, rownames(sigtab_dds_CP_KO), function(x) max(x))
+x = sort(x, TRUE)
+rownames(sigtab_dds_CP_KO) = factor(as.character(rownames(sigtab_dds_CP_KO)), levels=names(x))
+
+# Fold-change plot
+ggplot(as.data.frame(sigtab_dds_CP_KO), aes(x=rownames(sigtab_dds_CP_KO), y=log2FoldChange)) + geom_point(size=6) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+# Volcano plot
+EnhancedVolcano(res_dds_CP_KO,
+                lab = rownames(res_dds_CP_KO),
+                subtitle = NULL,
+                caption = NULL,
+#                legendVisible = FALSE,
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = 0.05,
+#                transcriptPointSize = 1.5,
+#                transcriptLabSize = 4.0,
+                col=c('black', 'black', 'black', 'red3'),
+                colAlpha = 1,
+                drawConnectors = TRUE)
+
+```
